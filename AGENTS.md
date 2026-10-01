@@ -1,6 +1,8 @@
 # appchi-migrations
 
-One ordered, checksummed PostgreSQL migration chain and a dedicated migration runner.
+One ordered Alembic chain over immutable, checksummed PostgreSQL SQL files, with a
+dedicated migration runner. Preserve SQL bytes, the checksum ledger and validated
+legacy adoption; see README for revision authoring and isolated database tests.
 
 Read the workspace-level `../AGENTS.md` and the system design in
 `../appchi-design/specs/spec-alerts-management-system.md` before changes. Read the
