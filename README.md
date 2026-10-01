@@ -1,0 +1,29 @@
+# appchi-migrations
+
+One ordered, checksummed PostgreSQL migration chain and a dedicated migration runner.
+
+See [system design](https://github.com/appchi-alert-operations/appchi-design), [workspace setup](https://github.com/appchi-alert-operations/appchi-delivery) and [source provenance](SOURCE.md).
+
+## Development
+
+Use Python 3.13 and the committed `uv.lock`. Configure Git authentication for the
+private organization repositories before resolving internal dependencies.
+
+```powershell
+uv sync --locked --all-extras
+uv run --locked ruff check src tests
+uv run --locked pytest
+uv build --wheel
+```
+
+Shared `appchi` modules use namespace packaging; each module has exactly one owning
+distribution. Dependencies resolve immutable Git revisions in Python dependency metadata and `uv.lock`.
+For coordinated local edits use the delivery workspace setup, which installs local
+packages without changing release dependency pins.
+
+## Execution
+
+`uv run --locked appchi-migrate` is the entrypoint. Supply the documented environment
+bindings; package installation does not start services or migrate data.
+
+The wheel includes every SQL migration under `appchi/migration_sql`. Set `APPCHI_MIGRATION_URL` for the dedicated migration identity. Preserve exact applied SQL bytes and filenames. Runtime services never migrate on startup.
