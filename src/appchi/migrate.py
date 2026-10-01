@@ -35,8 +35,13 @@ def migrate(dsn: str, directory: Path):
             )
 
 
+def migration_directory():
+    """SQL files bundled in appchi-migrations, usable from a wheel or checkout."""
+    return Path(__file__).resolve().parent / "migration_sql"
+
+
 def main():
-    migrate(os.environ["APPCHI_MIGRATION_URL"], Path(__file__).resolve().parents[2] / "migrations")
+    migrate(os.environ["APPCHI_MIGRATION_URL"], migration_directory())
 
 
 if __name__ == "__main__":
