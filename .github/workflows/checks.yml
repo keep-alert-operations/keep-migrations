@@ -5,6 +5,18 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: appchi_migration_test
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U appchi_migration_test -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -12,9 +24,9 @@ jobs:
           version: "0.10.8"
       - name: Locked install and checks
         env:
-          APPCHI_TOKEN: ${{ secrets.APPCHI_REPOSITORIES_TOKEN }}
+          APPCHI_MIGRATION_TEST_ADMIN_URL: postgresql://appchi_migration_test@localhost:5432/postgres
         run: |
           uv sync --locked --all-extras
           uv run --locked ruff check src tests
-          if [ -d tests/unit ]; then uv run --locked pytest tests/unit -q; fi
+          uv run --locked pytest tests -q
           uv build --wheel
