@@ -49,6 +49,14 @@ All database commands use `APPCHI_MIGRATION_URL`; no credentials belong in
 ## Existing databases and rollout
 
 The original 44 SQL files (0001–0047, retaining the numbering gaps) are unchanged.
+The current chain adds 0048 for maintenance continuation and 0049 for exclusive
+search reconciliation leases, delta progress, separate repair-audit cursors and
+independent retry diagnostics. Revision 0050 adds a partial live-note lookup
+index for projection probes and ordered streaming reads. Apply all three before
+starting the updated writers. Index creation uses the migration transaction and
+belongs in the same stopped-writer migration window; allow time for retained notes.
+Existing continuation values remain nullable and historical unions default to
+full snapshots; no prior replay proof is rewritten by these migrations.
 `schema_migrations` remains the checksum/audit ledger. `alembic_version` records
 the revision Alembic has reached; both must describe the same ordered prefix.
 
@@ -78,7 +86,7 @@ Use a reviewed forward migration for corrections.
 1. Check the current head and highest SQL number; preserve all published files,
    checksums and numbering gaps. Use the next four-digit identifier.
 2. Create its revision, for example
-   `uv run --locked alembic revision --rev-id 0048 -m "descriptive change"`.
+   `uv run --locked alembic revision --rev-id 0051 -m "descriptive change"`.
 3. Add the SQL file named by the generated revision's `sql_file` under
    `src/appchi/migration_sql`. Add its exact-byte SHA-256 entry to
    `src/appchi/migration_sql/checksums.json`; do not update old entries.

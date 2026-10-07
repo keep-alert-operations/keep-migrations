@@ -16,9 +16,9 @@ def test_extracted_migration_bytes_and_complete_chain():
 
 def test_every_sql_file_has_one_ordered_alembic_revision():
     chain = migration_chain(alembic_config())
-    assert len(chain) == 44
+    assert len(chain) == 47
     assert chain[0].revision == "0001"
-    assert chain[-1].revision == "0047"
+    assert chain[-1].revision == "0050"
     assert {"0010", "0042", "0043"}.isdisjoint(step.revision for step in chain)
 
 
@@ -34,7 +34,7 @@ def test_pending_sql_is_verified_before_connecting(tmp_path):
 def test_sql_without_a_revision_is_rejected(tmp_path):
     directory = tmp_path / "sql"
     shutil.copytree(migration_directory(), directory)
-    (directory / "0048_unregistered.sql").write_text("SELECT 1;")
+    (directory / "0051_unregistered.sql").write_text("SELECT 1;")
     with pytest.raises(RuntimeError, match="disagree"):
         migration_chain(alembic_config(directory))
 
@@ -43,8 +43,8 @@ def test_multiple_revision_heads_are_rejected(tmp_path):
     config = alembic_config()
     scripts = tmp_path / "alembic"
     shutil.copytree(config.get_main_option("script_location"), scripts)
-    (scripts / "versions" / "0048_branch.py").write_text(
-        "revision='0048'\ndown_revision='0045'\nbranch_labels=None\ndepends_on=None\n"
+    (scripts / "versions" / "0051_branch.py").write_text(
+        "revision='0051'\ndown_revision='0045'\nbranch_labels=None\ndepends_on=None\n"
     )
     config.set_main_option("script_location", str(scripts).replace("%", "%%"))
     with pytest.raises(RuntimeError, match="one Alembic head"):

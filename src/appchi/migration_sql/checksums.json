@@ -42,5 +42,8 @@
   "0044_kafka_diagnostics.sql": "430a298fe8249b80ad295897427a66718ba119700604656fbdd2088e95d28a0a",
   "0045_legacy_alert_writers_fence.sql": "2d06a21da9214f6283d0c8518eaabe9e08b37aa2fcee6df114a8b1c4039112b1",
   "0046_worker_scope.sql": "cb4565a26c8914418e09e20e33b7b7d1732265723792934690543b48eea19584",
-  "0047_api_live_hints.sql": "3457eff1836ea72091fbae0222b1d56e8d5ae3854fadef24c4f5295996531b78"
+  "0047_api_live_hints.sql": "3457eff1836ea72091fbae0222b1d56e8d5ae3854fadef24c4f5295996531b78",
+  "0048_maintenance_continuation.sql": "92e63d619a99ec7c4d22bbb956316260bf4ff704e16e5d33c6303820ed98a9cc",
+  "0049_search_reconciliation_leases.sql": "2237e9ae59938ddb7d53c41e3c332f13eef6101eeecfed7929525584c6bc2719",
+  "0050_alert_notes_projection_lookup.sql": "a8c22652cc097fe54685841145db8cc63fcf994387afa473780bdb22863d7f33"
 }

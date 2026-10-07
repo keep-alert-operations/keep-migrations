@@ -1,6 +1,7 @@
 """Migration adoption and failure safety on a disposable PostgreSQL cluster."""
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -71,7 +72,7 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0047",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0050",)]
         for role in ("appchi_api", "appchi_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -85,13 +86,13 @@ def assert_head_and_privileges(dsn):
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 44
+    assert len(before) == 47
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
 
 
-@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047"])
+@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049"])
 def test_adopt_legacy_without_replaying_sql(migration_db, through):
     legacy_install(migration_db, through)
     before = ledger(migration_db)
@@ -177,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0047" in cli(migration_db, "current").stdout
+    assert "0050" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -233,5 +234,35 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 44
+    assert len(ledger(migration_db)) == 47
     assert_head_and_privileges(migration_db)
+
+
+def test_scalability_upgrade_preserves_scan_progress_and_adds_safe_nullable_state(migration_db):
+    legacy_install(migration_db, "0047")
+    tenant = uuid4()
+    with psycopg.connect(migration_db) as conn:
+        conn.execute("INSERT INTO tenants(id,kind,name,name_key) VALUES(%s,'specific','Scale','scale')", (tenant,))
+        conn.execute("INSERT INTO search_reconciliation(index_epoch,tenant_id,boundary_seq) VALUES('scale',%s,99)", (tenant,))
+    migrate(migration_db)
+    with psycopg.connect(migration_db) as conn:
+        assert conn.execute("SELECT boundary_seq,lease_owner,lease_until,retry_after,last_error FROM search_reconciliation WHERE tenant_id=%s", (tenant,)).fetchone() == (99, None, None, None, None)
+        assert conn.execute("SELECT floor_seq,full_audit_at,audit_cursor,audit_boundary_seq,audit_started_at,audit_page_at,audit_turns FROM search_reconciliation WHERE tenant_id=%s", (tenant,)).fetchone() == (0, None, None, None, None, None, 0)
+        assert conn.execute("SELECT audit_retry_after,audit_last_error FROM search_reconciliation WHERE tenant_id=%s", (tenant,)).fetchone() == (None, None)
+        # The actual streaming predicate can use a live-note index even when
+        # this small upgrade fixture has no notes. Avoid a full-table fallback.
+        conn.execute("SET LOCAL enable_seqscan=off")
+        plan = conn.execute("EXPLAIN (FORMAT JSON) SELECT text FROM alert_notes WHERE tenant_id=%s AND alert_id=%s AND NOT deleted ORDER BY id", (tenant, uuid4())).fetchone()[0]
+        assert "alert_notes_projection_lookup" in json.dumps(plan)
+        assert conn.execute("SELECT is_nullable,data_type FROM information_schema.columns WHERE table_name='maintenance_alert_checkpoints' AND column_name='continuation'").fetchone() == ("YES", "jsonb")
+        conn.execute("SET LOCAL ROLE appchi_worker")
+        conn.execute("UPDATE search_reconciliation SET lease_owner=%s,lease_until=clock_timestamp()+interval '30 seconds' WHERE tenant_id=%s", (uuid4(), tenant))
+    with psycopg.connect(migration_db) as conn:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute("UPDATE search_reconciliation SET lease_owner=NULL WHERE tenant_id=%s", (tenant,))
+    with psycopg.connect(migration_db) as conn:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute("UPDATE search_reconciliation SET audit_boundary_seq=99 WHERE tenant_id=%s", (tenant,))
+    with psycopg.connect(migration_db) as conn:
+        conn.execute("SET LOCAL ROLE appchi_worker")
+        conn.execute("UPDATE search_reconciliation SET audit_boundary_seq=99,audit_started_at=clock_timestamp(),audit_turns=4 WHERE tenant_id=%s", (tenant,))
