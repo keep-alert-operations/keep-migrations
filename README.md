@@ -6,24 +6,25 @@ See [system design](https://github.com/appchi-alert-operations/appchi-design), [
 
 ## Development
 
-Use Python 3.13 and the committed `uv.lock`. Configure Git authentication for the
+Use Python 3.13, Poetry 2.3.1 and the committed `poetry.lock`. Configure Git authentication for the
 private organization repositories before resolving internal dependencies.
 
 ```powershell
-uv sync --locked --all-extras
-uv run --locked ruff check src tests
-uv run --locked pytest
-uv build --wheel
+poetry check --lock
+poetry sync --all-extras
+poetry run ruff check src tests
+poetry run pytest
+poetry build --format wheel
 ```
 
 Shared `appchi` modules use namespace packaging; each module has exactly one owning
-distribution. Dependencies resolve immutable Git revisions in Python dependency metadata and `uv.lock`.
+distribution. Dependencies resolve immutable Git revisions in Python dependency metadata and `poetry.lock`.
 For coordinated local edits use the delivery workspace setup, which installs local
 packages without changing release dependency pins.
 
 ## Execution
 
-`uv run --locked appchi-migrate` is the entrypoint. Supply the documented environment
+`poetry run appchi-migrate` is the entrypoint. Supply the documented environment
 bindings; package installation does not start services or migrate data.
 
 Set `APPCHI_MIGRATION_URL` to the dedicated migration identity's PostgreSQL URL or
@@ -35,10 +36,10 @@ revisions, SQL files and `migration_sql/checksums.json` manifest.
 From this repository, the standard Alembic commands are also available:
 
 ```powershell
-uv run --locked alembic history
-uv run --locked alembic heads
-uv run --locked alembic current
-uv run --locked alembic upgrade head
+poetry run alembic history
+poetry run alembic heads
+poetry run alembic current
+poetry run alembic upgrade head
 ```
 
 `history` and `heads` do not connect to PostgreSQL. `current` verifies the packaged
@@ -86,7 +87,7 @@ Use a reviewed forward migration for corrections.
 1. Check the current head and highest SQL number; preserve all published files,
    checksums and numbering gaps. Use the next four-digit identifier.
 2. Create its revision, for example
-   `uv run --locked alembic revision --rev-id 0051 -m "descriptive change"`.
+   `poetry run alembic revision --rev-id 0051 -m "descriptive change"`.
 3. Add the SQL file named by the generated revision's `sql_file` under
    `src/appchi/migration_sql`. Add its exact-byte SHA-256 entry to
    `src/appchi/migration_sql/checksums.json`; do not update old entries.
@@ -106,7 +107,7 @@ whose test identity can create/drop databases and create the synthetic runtime
 roles. Each test creates a uniquely named database and removes it afterward.
 
 ```powershell
-uv run --locked pytest tests -q
+poetry run pytest tests -q
 ```
 
 Without that binding, database tests skip. CI supplies an isolated PostgreSQL 18
