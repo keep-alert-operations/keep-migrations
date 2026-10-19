@@ -72,7 +72,7 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0050",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0051",)]
         for role in ("appchi_api", "appchi_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -86,13 +86,13 @@ def assert_head_and_privileges(dsn):
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 47
+    assert len(before) == 48
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
 
 
-@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049"])
+@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050"])
 def test_adopt_legacy_without_replaying_sql(migration_db, through):
     legacy_install(migration_db, through)
     before = ledger(migration_db)
@@ -178,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0050" in cli(migration_db, "current").stdout
+    assert "0051" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -234,7 +234,7 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 47
+    assert len(ledger(migration_db)) == 48
     assert_head_and_privileges(migration_db)
 
 
@@ -266,3 +266,27 @@ def test_scalability_upgrade_preserves_scan_progress_and_adds_safe_nullable_stat
     with psycopg.connect(migration_db) as conn:
         conn.execute("SET LOCAL ROLE appchi_worker")
         conn.execute("UPDATE search_reconciliation SET audit_boundary_seq=99,audit_started_at=clock_timestamp(),audit_turns=4 WHERE tenant_id=%s", (tenant,))
+
+
+def test_source_assignment_catch_up_reads_only_unconfirmed_results(migration_db):
+    legacy_install(migration_db, "0050")
+    tenant, topic = uuid4(), "appchi.test.alerts.received"
+    with psycopg.connect(migration_db) as conn:
+        conn.execute("INSERT INTO tenants(id,kind,name,name_key) VALUES(%s,'specific','Source','source')", (tenant,))
+        conn.execute("SET LOCAL ROLE appchi_worker")
+        # Retained history from before the upgrade; the last ten inputs lost confirmation.
+        conn.execute(
+            "INSERT INTO kafka_source_results(delivery_id,tenant_id,topic,partition,input_offset,input_digest,received_at,outcome,kafka_confirmed) "
+            "SELECT gen_random_uuid(),%s,%s,0,n,decode('00','hex'),clock_timestamp(),'applied',n<20000 FROM generate_series(0,20009) n",
+            (tenant, topic),
+        )
+    migrate(migration_db)
+    # The processor's assignment statement, below a committed offset of 20005.
+    catch_up = "UPDATE kafka_source_results SET kafka_confirmed=true WHERE topic=%s AND partition=%s AND input_offset<%s AND NOT kafka_confirmed"
+    with psycopg.connect(migration_db) as conn:
+        conn.execute("ANALYZE kafka_source_results")
+        conn.execute("SET LOCAL ROLE appchi_worker")
+        plan = conn.execute("EXPLAIN (FORMAT JSON) " + catch_up, (topic, 0, 20005)).fetchone()[0]
+        assert "kafka_source_results_unconfirmed" in json.dumps(plan)
+        assert conn.execute(catch_up, (topic, 0, 20005)).rowcount == 5
+        assert conn.execute("SELECT array_agg(input_offset ORDER BY input_offset) FROM kafka_source_results WHERE NOT kafka_confirmed").fetchone() == ([20005, 20006, 20007, 20008, 20009],)

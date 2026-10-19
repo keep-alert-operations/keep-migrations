@@ -56,6 +56,11 @@ independent retry diagnostics. Revision 0050 adds a partial live-note lookup
 index for projection probes and ordered streaming reads. Apply all three before
 starting the updated writers. Index creation uses the migration transaction and
 belongs in the same stopped-writer migration window; allow time for retained notes.
+Revision 0051 adds a partial index of unconfirmed source results, so the source
+processor's partition-assignment catch-up reads only unconfirmed inputs instead of
+the partition's whole retained history. Writers are compatible with or without it,
+but its build blocks source-result writes for one scan of the retained table; run
+it in the same window.
 Existing continuation values remain nullable and historical unions default to
 full snapshots; no prior replay proof is rewritten by these migrations.
 `schema_migrations` remains the checksum/audit ledger. `alembic_version` records
@@ -87,7 +92,7 @@ Use a reviewed forward migration for corrections.
 1. Check the current head and highest SQL number; preserve all published files,
    checksums and numbering gaps. Use the next four-digit identifier.
 2. Create its revision, for example
-   `poetry run alembic revision --rev-id 0051 -m "descriptive change"`.
+   `poetry run alembic revision --rev-id 0052 -m "descriptive change"`.
 3. Add the SQL file named by the generated revision's `sql_file` under
    `src/appchi/migration_sql`. Add its exact-byte SHA-256 entry to
    `src/appchi/migration_sql/checksums.json`; do not update old entries.
