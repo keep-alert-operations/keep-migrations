@@ -99,7 +99,7 @@ Use a reviewed forward migration for corrections.
 1. Check the current head and highest SQL number; preserve all published files,
    checksums and numbering gaps. Use the next four-digit identifier.
 2. Create its revision, for example
-   `poetry run alembic revision --rev-id 0052 -m "descriptive change"`.
+   `poetry run alembic revision --rev-id NNNN -m "descriptive change"`.
 3. Add the SQL file named by the generated revision's `sql_file` under
    `src/appchi/migration_sql`. Add its exact-byte SHA-256 entry to
    `src/appchi/migration_sql/checksums.json`; do not update old entries.
