@@ -292,6 +292,12 @@ def test_source_assignment_catch_up_reads_only_unconfirmed_results(migration_db)
         assert conn.execute("SELECT array_agg(input_offset ORDER BY input_offset) FROM kafka_source_results WHERE NOT kafka_confirmed").fetchone() == ([20005, 20006, 20007, 20008, 20009],)
 
 
+def plan_nodes(node):
+    yield node
+    for child in node.get("Plans", ()):
+        yield from plan_nodes(child)
+
+
 def test_search_retention_probe_reads_only_pending_retirements(migration_db):
     legacy_install(migration_db, "0051")
     tenant, other = uuid4(), uuid4()
@@ -299,11 +305,13 @@ def test_search_retention_probe_reads_only_pending_retirements(migration_db):
         for name, key in ((tenant, "probe"), (other, "other")):
             conn.execute("INSERT INTO tenants(id,kind,name,name_key) VALUES(%s,'specific',%s,%s)", (name, key, key))
             conn.execute("INSERT INTO tenant_view_state(tenant_id) VALUES(%s) ON CONFLICT DO NOTHING", (name,))
+            conn.execute("UPDATE tenant_view_state SET searchable_seq=20000 WHERE tenant_id=%s", (name,))
         conn.execute("SET LOCAL ROLE appchi_worker")
-        # Kafka-first projection history: no row ever becomes visible.
+        # Kafka-first projection history: no row ever becomes visible. Every 40th
+        # row is an already-searchable retirement; the rest are live.
         conn.execute(
             "INSERT INTO projection_work(tenant_id,seq,alert_id,version,snapshot) "
-            "SELECT t,n,gen_random_uuid(),1,jsonb_build_object('live',true,'deleted',false) "
+            "SELECT t,n,gen_random_uuid(),1,jsonb_build_object('live',n%%40<>0,'deleted',false) "
             "FROM unnest(%s::uuid[]) t, generate_series(1,20000) n",
             ([tenant, other],),
         )
@@ -316,12 +324,20 @@ def test_search_retention_probe_reads_only_pending_retirements(migration_db):
     )
     with psycopg.connect(migration_db) as conn:
         conn.execute("ANALYZE projection_work")
+        conn.execute("ANALYZE tenant_view_state")
         conn.execute("SET LOCAL ROLE appchi_api")
         conn.execute("SELECT set_config('appchi.tenant_id',%s,true)", (str(tenant),))
+        # Planner choice between index paths is what is asserted, not scan costs.
+        conn.execute("SET LOCAL enable_seqscan = off")
+        conn.execute("SET LOCAL enable_bitmapscan = off")
         plan = conn.execute("EXPLAIN (FORMAT JSON) " + probe, {"tenant": tenant}).fetchone()[0]
-        scan = plan[0]["Plan"]["Plans"][0]
-        assert scan["Index Name"] == "projection_work_retirement_pending"
-        assert "seq >" in scan["Index Cond"]  # starts past searchable_seq
+        scans = [
+            node
+            for node in plan_nodes(plan[0]["Plan"])
+            if node.get("Index Name") == "projection_work_retirement_pending"
+            and "seq >" in node.get("Index Cond", "")  # starts past searchable_seq
+        ]
+        assert scans, json.dumps(plan)
         assert conn.execute(probe, {"tenant": tenant}).fetchone()[1] is False
         conn.execute(
             "INSERT INTO projection_work(tenant_id,seq,alert_id,version,snapshot) "
