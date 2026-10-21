@@ -61,6 +61,13 @@ processor's partition-assignment catch-up reads only unconfirmed inputs instead 
 the partition's whole retained history. Writers are compatible with or without it,
 but its build blocks source-result writes for one scan of the retained table; run
 it in the same window.
+Revision 0052 adds a partial index of projection rows that still await a
+retirement or deletion, matching the API's retention probe, so a search feed or
+count page no longer scans the tenant's whole projection history past
+`searchable_seq`. The API is correct with or without it. The runner's single
+transaction rules out `CREATE INDEX CONCURRENTLY`, so its build blocks
+`projection_work` inserts (alert writes and retirement) for one scan of the
+table; run it in a stopped-writer window like 0050 and 0051.
 Existing continuation values remain nullable and historical unions default to
 full snapshots; no prior replay proof is rewritten by these migrations.
 `schema_migrations` remains the checksum/audit ledger. `alembic_version` records
