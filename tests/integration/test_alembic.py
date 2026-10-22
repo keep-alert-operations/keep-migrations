@@ -72,7 +72,7 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0051",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0052",)]
         for role in ("appchi_api", "appchi_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -86,13 +86,13 @@ def assert_head_and_privileges(dsn):
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 48
+    assert len(before) == 49
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
 
 
-@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050"])
+@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050", "0051"])
 def test_adopt_legacy_without_replaying_sql(migration_db, through):
     legacy_install(migration_db, through)
     before = ledger(migration_db)
@@ -178,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0051" in cli(migration_db, "current").stdout
+    assert "0052" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -234,7 +234,7 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 48
+    assert len(ledger(migration_db)) == 49
     assert_head_and_privileges(migration_db)
 
 
@@ -290,3 +290,58 @@ def test_source_assignment_catch_up_reads_only_unconfirmed_results(migration_db)
         assert "kafka_source_results_unconfirmed" in json.dumps(plan)
         assert conn.execute(catch_up, (topic, 0, 20005)).rowcount == 5
         assert conn.execute("SELECT array_agg(input_offset ORDER BY input_offset) FROM kafka_source_results WHERE NOT kafka_confirmed").fetchone() == ([20005, 20006, 20007, 20008, 20009],)
+
+
+def plan_nodes(node):
+    yield node
+    for child in node.get("Plans", ()):
+        yield from plan_nodes(child)
+
+
+def test_search_retention_probe_reads_only_pending_retirements(migration_db):
+    legacy_install(migration_db, "0051")
+    tenant, other = uuid4(), uuid4()
+    with psycopg.connect(migration_db) as conn:
+        for name, key in ((tenant, "probe"), (other, "other")):
+            conn.execute("INSERT INTO tenants(id,kind,name,name_key) VALUES(%s,'specific',%s,%s)", (name, key, key))
+            conn.execute("INSERT INTO tenant_view_state(tenant_id) VALUES(%s) ON CONFLICT DO NOTHING", (name,))
+            conn.execute("UPDATE tenant_view_state SET searchable_seq=20000 WHERE tenant_id=%s", (name,))
+        conn.execute("SET LOCAL ROLE appchi_worker")
+        # Kafka-first projection history: no row ever becomes visible. Every 40th
+        # row is an already-searchable retirement; the rest are live.
+        conn.execute(
+            "INSERT INTO projection_work(tenant_id,seq,alert_id,version,snapshot) "
+            "SELECT t,n,gen_random_uuid(),1,jsonb_build_object('live',n%%40<>0,'deleted',false) "
+            "FROM unnest(%s::uuid[]) t, generate_series(1,20000) n",
+            ([tenant, other],),
+        )
+    migrate(migration_db)
+    # The feed's probe from appchi-api search_routes.py.
+    probe = (
+        "SELECT clock_timestamp() AS now,EXISTS(SELECT 1 FROM projection_work WHERE tenant_id=%(tenant)s"
+        " AND seq>(SELECT searchable_seq FROM tenant_view_state WHERE tenant_id=%(tenant)s)"
+        " AND NOT visible AND (snapshot->>'live'='false' OR snapshot->>'deleted'='true')) AS pending"
+    )
+    with psycopg.connect(migration_db) as conn:
+        conn.execute("ANALYZE projection_work")
+        conn.execute("ANALYZE tenant_view_state")
+        conn.execute("SET LOCAL ROLE appchi_api")
+        conn.execute("SELECT set_config('appchi.tenant_id',%s,true)", (str(tenant),))
+        # Planner choice between index paths is what is asserted, not scan costs.
+        conn.execute("SET LOCAL enable_seqscan = off")
+        conn.execute("SET LOCAL enable_bitmapscan = off")
+        plan = conn.execute("EXPLAIN (FORMAT JSON) " + probe, {"tenant": tenant}).fetchone()[0]
+        scans = [
+            node
+            for node in plan_nodes(plan[0]["Plan"])
+            if node.get("Index Name") == "projection_work_retirement_pending"
+            and "seq >" in node.get("Index Cond", "")  # starts past searchable_seq
+        ]
+        assert scans, json.dumps(plan)
+        assert conn.execute(probe, {"tenant": tenant}).fetchone()[1] is False
+        conn.execute(
+            "INSERT INTO projection_work(tenant_id,seq,alert_id,version,snapshot) "
+            "VALUES(%s,20001,gen_random_uuid(),2,'{\"live\":false,\"deleted\":false}')",
+            (tenant,),
+        )
+        assert conn.execute(probe, {"tenant": tenant}).fetchone()[1] is True
