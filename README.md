@@ -68,6 +68,18 @@ count page no longer scans the tenant's whole projection history past
 transaction rules out `CREATE INDEX CONCURRENTLY`, so its build blocks
 `projection_work` inserts (alert writes and retirement) for one scan of the
 table; run it in a stopped-writer window like 0050 and 0051.
+Revision 0053 (REV-39) deletes the `correlation` and `maintenance` capability
+gates, so both features are always on, and restarts rules that were saved
+blocked while correlation was gated with a fresh evaluation epoch and boundary.
+Runtime code from before 0053 reads those gate rows; stop every writer before
+applying it and start only updated services afterwards.
+Revision 0054 (REV-41) adds the nullable `received_topic_id` and
+`changed_topic_id` columns to `kafka_pipeline_control`. The cutover records the
+Kafka topic IDs there, and the updated source processor refuses a received topic
+that is not the recorded incarnation, or any received topic while none is recorded.
+Older code ignores the columns. For a cutover recorded before 0054, stop source,
+correlation and indexer, apply it, then run `python -m appchi.kafka_cutover
+--record-topic-identity` before starting the updated processor.
 Revision 0055 (REV-44) adds the nullable `presets.group_by` column for a saved
 preset's optional grouping field. It needs no stopped-writer window: older API
 code names its columns explicitly and leaves the new one unchanged.

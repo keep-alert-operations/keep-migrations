@@ -72,7 +72,7 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0052",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0055",)]
         for role in ("appchi_api", "appchi_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -86,13 +86,13 @@ def assert_head_and_privileges(dsn):
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 49
+    assert len(before) == 52
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
 
 
-@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050", "0051"])
+@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054"])
 def test_adopt_legacy_without_replaying_sql(migration_db, through):
     legacy_install(migration_db, through)
     before = ledger(migration_db)
@@ -178,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0052" in cli(migration_db, "current").stdout
+    assert "0055" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -234,7 +234,7 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 49
+    assert len(ledger(migration_db)) == 52
     assert_head_and_privileges(migration_db)
 
 
@@ -345,3 +345,61 @@ def test_search_retention_probe_reads_only_pending_retirements(migration_db):
             (tenant,),
         )
         assert conn.execute(probe, {"tenant": tenant}).fetchone()[1] is True
+
+
+def test_always_on_upgrade_removes_gates_and_restarts_blocked_rules(migration_db):
+    """Requirements: REV-39; correlation rules 6."""
+    legacy_install(migration_db, "0052")
+    tenant, actor = uuid4(), uuid4()
+    blocked, healthy, deleted = uuid4(), uuid4(), uuid4()
+    with psycopg.connect(migration_db) as conn:
+        conn.execute("INSERT INTO tenants(id,kind,name,name_key) VALUES(%s,'specific','Rules','rules')", (tenant,))
+        conn.execute("INSERT INTO tenant_work_state(tenant_id,admission_order) VALUES(%s,7)", (tenant,))
+        for rule, health, reason, gone in (
+            (blocked, "blocked", "consumer_not_integrated", None),
+            (healthy, "healthy", None, None),
+            (deleted, "blocked", "consumer_not_integrated", "2026-10-01T00:00:00Z"),
+        ):
+            conn.execute("INSERT INTO correlation_rule_identities(id,tenant_id) VALUES(%s,%s)", (rule, tenant))
+            conn.execute(
+                """INSERT INTO correlation_rules(id,tenant_id,revision,epoch,grouping_generation,name,name_key,name_profile,
+                description,severity,window_minutes,group_by,enabled,health,blocked_reason,last_reset_reason,profile,
+                evaluation_cost,epoch_boundary_at,epoch_boundary_order,created_at,updated_at,created_by,updated_by,deleted_at)
+                VALUES(%s,%s,1,1,1,%s,%s,'nfc','','medium',10,'[]',true,%s,%s,'created','cel',1,
+                '2026-10-01T00:00:00Z',3,'2026-10-01T00:00:00Z','2026-10-01T00:00:00Z',%s,%s,%s)""",
+                (rule, tenant, str(rule), str(rule), health, reason, actor, actor, gone),
+            )
+    migrate(migration_db)
+    with psycopg.connect(migration_db) as conn:
+        assert conn.execute(
+            "SELECT capability FROM capability_gates WHERE capability IN ('correlation','maintenance')"
+        ).fetchall() == []
+        assert conn.execute("SELECT admission_order FROM tenant_work_state WHERE tenant_id=%s", (tenant,)).fetchone() == (8,)
+        rows = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                "SELECT id,epoch,health,blocked_reason,last_reset_reason,epoch_boundary_order,epoch_boundary_at>created_at FROM correlation_rules"
+            )
+        }
+        assert rows[blocked] == (2, "healthy", None, "always_on", 8, True)
+        assert rows[healthy] == (1, "healthy", None, "created", 3, False)
+        assert rows[deleted] == (1, "blocked", "consumer_not_integrated", "created", 3, False)
+
+
+def test_topic_identity_upgrade_leaves_an_existing_cutover_unrecorded(migration_db):
+    """Requirements: REV-41; Kafka alert pipeline 8."""
+    legacy_install(migration_db, "0053")
+    with psycopg.connect(migration_db) as conn:
+        conn.execute("UPDATE kafka_pipeline_control SET enabled=true,received_partitions=1,changed_partitions=1")
+    migrate(migration_db)
+    with psycopg.connect(migration_db) as conn:
+        assert conn.execute(
+            "SELECT enabled,received_topic_id,changed_topic_id FROM kafka_pipeline_control"
+        ).fetchone() == (True, None, None)
+        # Kafka's topic ID text: 22 characters of unpadded URL-safe base64.
+        conn.execute(
+            "UPDATE kafka_pipeline_control SET received_topic_id='YnmTZeuHT_iG2FXpjd3lUQ',changed_topic_id='XvLjZHK5QdW5sr9DukPJTg'"
+        )
+        for invalid in ("/////+uHT/j/////jd3lUQ", "YnmTZeuHT_iG2FXpjd3lUQ==", ""):
+            with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+                conn.execute("UPDATE kafka_pipeline_control SET received_topic_id=%s", (invalid,))
