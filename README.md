@@ -68,6 +68,9 @@ count page no longer scans the tenant's whole projection history past
 transaction rules out `CREATE INDEX CONCURRENTLY`, so its build blocks
 `projection_work` inserts (alert writes and retirement) for one scan of the
 table; run it in a stopped-writer window like 0050 and 0051.
+Revision 0055 (REV-44) adds the nullable `presets.group_by` column for a saved
+preset's optional grouping field. It needs no stopped-writer window: older API
+code names its columns explicitly and leaves the new one unchanged.
 Existing continuation values remain nullable and historical unions default to
 full snapshots; no prior replay proof is rewritten by these migrations.
 `schema_migrations` remains the checksum/audit ledger. `alembic_version` records

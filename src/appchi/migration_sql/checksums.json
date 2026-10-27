@@ -47,5 +47,6 @@
   "0049_search_reconciliation_leases.sql": "2237e9ae59938ddb7d53c41e3c332f13eef6101eeecfed7929525584c6bc2719",
   "0050_alert_notes_projection_lookup.sql": "a8c22652cc097fe54685841145db8cc63fcf994387afa473780bdb22863d7f33",
   "0051_kafka_source_unconfirmed.sql": "d58a2cf4540146457cc7d809606eea4b7a3c19073f6ba8d9867b3b1511cd57c4",
-  "0052_projection_retirement_pending.sql": "756ce1db903d8a30cdc46e253c16d969a6ec9df300709f05c99911a38b25c1ae"
+  "0052_projection_retirement_pending.sql": "756ce1db903d8a30cdc46e253c16d969a6ec9df300709f05c99911a38b25c1ae",
+  "0055_preset_group_by.sql": "0fd0c081d7643f7ffac33ed00e9892f3dbe1e1982ce4fd5e707933ec3ac6e8d3"
 }
