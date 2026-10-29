@@ -83,6 +83,12 @@ correlation and indexer, apply it, then run `python -m appchi.kafka_cutover
 Revision 0055 (REV-44) adds the nullable `presets.group_by` column for a saved
 preset's optional grouping field. It needs no stopped-writer window: older API
 code names its columns explicitly and leaves the new one unchanged.
+Revision 0057 (REV-50) replaces the `dashboard_panels` width and height checks:
+width is 3 through 12 and height 2 or more, inside the unchanged grid bound. Existing
+rows already satisfy them and older API code writes only the old sizes, so it needs
+no stopped-writer window. Apply it before an API that accepts the new sizes; an older
+API reading a panel saved at a new size rejects it, so do not roll the API back past
+REV-50 once such panels exist.
 Existing continuation values remain nullable and historical unions default to
 full snapshots; no prior replay proof is rewritten by these migrations.
 `schema_migrations` remains the checksum/audit ledger. `alembic_version` records
