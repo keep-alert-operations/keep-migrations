@@ -50,5 +50,6 @@
   "0052_projection_retirement_pending.sql": "756ce1db903d8a30cdc46e253c16d969a6ec9df300709f05c99911a38b25c1ae",
   "0053_always_on_correlation_maintenance.sql": "3b0b3b65c669d61f63fe4a7bd9ddee11ea0e08bd4d5f94d674a41c71f9fa4a23",
   "0054_kafka_topic_identity.sql": "c220913fadd9edf0b33dd33a179ea2523e21219dd4d81cdead9c2d8a5a81c107",
-  "0055_preset_group_by.sql": "0fd0c081d7643f7ffac33ed00e9892f3dbe1e1982ce4fd5e707933ec3ac6e8d3"
+  "0055_preset_group_by.sql": "0fd0c081d7643f7ffac33ed00e9892f3dbe1e1982ce4fd5e707933ec3ac6e8d3",
+  "0056_alert_dismissal.sql": "6f0a7589ce38f6b041ed986896422ccff8945522ebab0f91ff03b787cd4e2186"
 }

@@ -72,7 +72,7 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0055",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0056",)]
         for role in ("appchi_api", "appchi_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -86,13 +86,13 @@ def assert_head_and_privileges(dsn):
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 52
+    assert len(before) == 53
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
 
 
-@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054"])
+@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055"])
 def test_adopt_legacy_without_replaying_sql(migration_db, through):
     legacy_install(migration_db, through)
     before = ledger(migration_db)
@@ -178,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0055" in cli(migration_db, "current").stdout
+    assert "0056" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -234,7 +234,7 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 52
+    assert len(ledger(migration_db)) == 53
     assert_head_and_privileges(migration_db)
 
 
