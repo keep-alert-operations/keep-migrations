@@ -72,7 +72,7 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0057",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0058",)]
         for role in ("appchi_api", "appchi_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -86,13 +86,13 @@ def assert_head_and_privileges(dsn):
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 54
+    assert len(before) == 55
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
 
 
-@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056"])
+@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057"])
 def test_adopt_legacy_without_replaying_sql(migration_db, through):
     legacy_install(migration_db, through)
     before = ledger(migration_db)
@@ -178,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0057" in cli(migration_db, "current").stdout
+    assert "0058" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -234,7 +234,7 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 54
+    assert len(ledger(migration_db)) == 55
     assert_head_and_privileges(migration_db)
 
 
@@ -403,3 +403,67 @@ def test_topic_identity_upgrade_leaves_an_existing_cutover_unrecorded(migration_
         for invalid in ("/////+uHT/j/////jd3lUQ", "YnmTZeuHT_iG2FXpjd3lUQ==", ""):
             with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
                 conn.execute("UPDATE kafka_pipeline_control SET received_topic_id=%s", (invalid,))
+
+
+def test_incident_report_reads_use_period_and_assignment_indexes(migration_db):
+    """Requirements: REV-53; incident operations 20; N3; reliability operations 5."""
+    legacy_install(migration_db, "0057")
+    tenant = uuid4()
+    seed = (
+        "SELECT n,timestamptz '2026-01-01 00:00:00+00' + n * interval '3 hours' AS t FROM generate_series(1,2000) n"
+    )
+    with psycopg.connect(migration_db) as conn:
+        conn.execute("INSERT INTO tenants(id,kind,name,name_key) VALUES(%s,'specific','Reports','reports')", (tenant,))
+        conn.execute(
+            "INSERT INTO incident_identities(id,tenant_id) SELECT md5('i'||n)::uuid,%s FROM generate_series(1,2000) n",
+            (tenant,),
+        )
+        conn.execute(
+            "INSERT INTO incidents(id,tenant_id,title,description,severity,status,origin,cycle_id,created_at,updated_at,last_activity,resolved_at) "
+            "SELECT md5('i'||n)::uuid,%s,'Incident '||n,'',(ARRAY['critical','high','medium','low'])[1+n%%4],'resolved','manual',"
+            f"md5('c'||n)::uuid,t,t,t+interval '1 hour',t+interval '1 hour' FROM ({seed}) s",
+            (tenant,),
+        )
+        conn.execute(
+            "INSERT INTO incident_cycles(tenant_id,incident_id,id,opened_at,resolved_at,cause) "
+            f"SELECT %s,md5('i'||n)::uuid,md5('c'||n)::uuid,t,t+interval '1 hour','manual' FROM ({seed}) s",
+            (tenant,),
+        )
+        # Each incident has twenty link entries and one assignment in its activity.
+        conn.execute(
+            "INSERT INTO incident_activity(tenant_id,incident_id,id,kind,recorded_at,evidence) "
+            "SELECT %s,md5('i'||n)::uuid,gen_random_uuid(),CASE WHEN k=1 THEN 'assignment' ELSE 'link' END,"
+            f"t+k*interval '1 minute','{{}}'::jsonb FROM ({seed}) s,generate_series(1,20) k",
+            (tenant,),
+        )
+    migrate(migration_db)
+    reads = {
+        "incident_cycles_tenant_opened": "SELECT count(*) FROM incident_cycles WHERE tenant_id=%(tenant)s AND opened_at>=%(start)s AND opened_at<%(end)s",
+        "incident_cycles_tenant_resolved": "SELECT count(*) FROM incident_cycles WHERE tenant_id=%(tenant)s AND resolved_at>=%(start)s AND resolved_at<%(end)s",
+        "incident_activity_assignee": (
+            "SELECT recorded_at FROM incident_activity WHERE incident_id=%(incident)s AND kind IN ('assignment','eligibility_lost') "
+            "AND recorded_at<=%(end)s ORDER BY recorded_at DESC LIMIT 1"
+        ),
+    }
+    params = {"tenant": tenant, "start": "2026-03-01T00:00:00Z", "end": "2026-04-01T00:00:00Z", "incident": None}
+    with psycopg.connect(migration_db) as conn:
+        params["incident"] = conn.execute("SELECT md5('i'||500)::uuid").fetchone()[0]
+        leaves = {
+            name: {row[0] for row in conn.execute("SELECT relid::regclass::text FROM pg_partition_tree(%s) WHERE isleaf", (name,))}
+            for name in reads
+        }
+        assert all(len(found) == 32 for found in leaves.values()), leaves
+        conn.execute("ANALYZE incident_cycles")
+        conn.execute("ANALYZE incident_activity")
+        conn.execute("SET LOCAL ROLE appchi_api")
+        conn.execute("SELECT set_config('appchi.tenant_id',%s,true)", (str(tenant),))
+        # The planner's choice of index path is asserted, not scan costs.
+        conn.execute("SET LOCAL enable_seqscan = off")
+        conn.execute("SET LOCAL enable_bitmapscan = off")
+        for name, read in reads.items():
+            plan = conn.execute("EXPLAIN (FORMAT JSON) " + read, params).fetchone()[0]
+            used = {node.get("Index Name") for node in plan_nodes(plan[0]["Plan"])} - {None}
+            assert used and used <= leaves[name], json.dumps(plan)
+            assert not any("Seq Scan" == node.get("Node Type") for node in plan_nodes(plan[0]["Plan"])), json.dumps(plan)
+        assert conn.execute(reads["incident_cycles_tenant_opened"], params).fetchone() == (248,)
+        assert conn.execute(reads["incident_activity_assignee"], params).fetchone() is not None

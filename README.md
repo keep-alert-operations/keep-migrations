@@ -89,6 +89,12 @@ rows already satisfy them and older API code writes only the old sizes, so it ne
 no stopped-writer window. Apply it before an API that accepts the new sizes; an older
 API reading a panel saved at a new size rejects it, so do not roll the API back past
 REV-50 once such panels exist.
+Revision 0058 (REV-53) indexes `incident_cycles` by tenant and opening time and by
+tenant and resolution time, and assignment history in `incident_activity` by incident
+and time, for the incident report's period reads. The API is correct without them,
+only slower. Their build blocks incident cycle and activity writes for one scan of
+each table, so run it in a stopped-writer window like 0050–0052, before the API that
+serves incident reports.
 Existing continuation values remain nullable and historical unions default to
 full snapshots; no prior replay proof is rewritten by these migrations.
 `schema_migrations` remains the checksum/audit ledger. `alembic_version` records
