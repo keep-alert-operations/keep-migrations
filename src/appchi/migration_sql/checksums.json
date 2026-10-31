@@ -54,5 +54,6 @@
   "0056_alert_dismissal.sql": "6f0a7589ce38f6b041ed986896422ccff8945522ebab0f91ff03b787cd4e2186",
   "0057_free_panel_size.sql": "2052e13b8e8601445924cea5ddabbb9a5557b25cdc7a09296b4ae290152f3195",
   "0058_incident_report_indexes.sql": "5c5a9bc48370f17b449892bb9b477af340f01efc8cf0aa36ce4141b5f1cd5c67",
-  "0059_alert_name.sql": "f19eef8e6cdb5fe3777ba12f7fea608f90da7f64cf815dc6be91e51151863990"
+  "0059_alert_name.sql": "f19eef8e6cdb5fe3777ba12f7fea608f90da7f64cf815dc6be91e51151863990",
+  "0060_alert_provider.sql": "ba27a5c637f5068739322b212b209cc164ce8109d903c50fa9408a86d73654ed"
 }
