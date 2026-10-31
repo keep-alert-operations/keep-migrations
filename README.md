@@ -95,6 +95,10 @@ and time, for the incident report's period reads. The API is correct without the
 only slower. Their build blocks incident cycle and activity writes for one scan of
 each table, so run it in a stopped-writer window like 0050–0052, before the API that
 serves incident reports.
+Revision 0059 (REV-54) adds the nullable `alerts.name` column for a sender-supplied
+v2 alert name. It rewrites no rows and needs no stopped-writer window: older source
+code names its insert columns from the alert record, so its rows keep NULL, which
+means unnamed. Apply it before the processor that stores names.
 Existing continuation values remain nullable and historical unions default to
 full snapshots; no prior replay proof is rewritten by these migrations.
 `schema_migrations` remains the checksum/audit ledger. `alembic_version` records

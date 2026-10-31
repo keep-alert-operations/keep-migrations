@@ -16,9 +16,9 @@ def test_extracted_migration_bytes_and_complete_chain():
 
 def test_every_sql_file_has_one_ordered_alembic_revision():
     chain = migration_chain(alembic_config())
-    assert len(chain) == 55
+    assert len(chain) == 56
     assert chain[0].revision == "0001"
-    assert chain[-1].revision == "0058"
+    assert chain[-1].revision == "0059"
     assert {"0010", "0042", "0043"}.isdisjoint(step.revision for step in chain)
 
 
