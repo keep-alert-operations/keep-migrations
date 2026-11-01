@@ -99,6 +99,12 @@ Revision 0059 (REV-54) adds the nullable `alerts.name` column for a sender-suppl
 v2 alert name. It rewrites no rows and needs no stopped-writer window: older source
 code names its insert columns from the alert record, so its rows keep NULL, which
 means unnamed. Apply it before the processor that stores names.
+Revision 0060 (REV-55) adds the nullable `alerts.provider` (`api` or `grafana`) and
+`alerts.alert_rule_url` columns, with a check that only a Grafana provider has a rule
+URL. It rewrites no rows and needs no stopped-writer window; validating the checks
+reads `alerts` once under the migration's table lock. Older source code leaves both
+NULL, which marks a row for the source processor's one-time provider backfill. Apply
+it before the processor that stores providers.
 Existing continuation values remain nullable and historical unions default to
 full snapshots; no prior replay proof is rewritten by these migrations.
 `schema_migrations` remains the checksum/audit ledger. `alembic_version` records
