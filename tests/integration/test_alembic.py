@@ -72,7 +72,7 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0061",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0062",)]
         for role in ("appchi_api", "appchi_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -86,13 +86,13 @@ def assert_head_and_privileges(dsn):
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 58
+    assert len(before) == 59
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
 
 
-@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060"])
+@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060", "0061"])
 def test_adopt_legacy_without_replaying_sql(migration_db, through):
     legacy_install(migration_db, through)
     before = ledger(migration_db)
@@ -178,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0061" in cli(migration_db, "current").stdout
+    assert "0062" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -234,7 +234,7 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 58
+    assert len(ledger(migration_db)) == 59
     assert_head_and_privileges(migration_db)
 
 
@@ -467,3 +467,53 @@ def test_incident_report_reads_use_period_and_assignment_indexes(migration_db):
             assert not any("Seq Scan" == node.get("Node Type") for node in plan_nodes(plan[0]["Plan"])), json.dumps(plan)
         assert conn.execute(reads["incident_cycles_tenant_opened"], params).fetchone() == (248,)
         assert conn.execute(reads["incident_activity_assignee"], params).fetchone() is not None
+
+
+def test_panel_types_keep_existing_panels_as_counts(migration_db):
+    """Requirements: REV-57; dashboard operations 2, 5 and 13."""
+    legacy_install(migration_db, "0061")
+    tenant, actor, preset, board, old = uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    with psycopg.connect(migration_db) as conn:
+        conn.execute("INSERT INTO tenants(id,kind,name,name_key) VALUES(%s,'specific','Panels','panels')", (tenant,))
+        conn.execute(
+            "INSERT INTO presets(id,tenant_id,name,name_key,cel,profile,sort,columns,created_at,updated_at,created_by,updated_by) "
+            "VALUES(%s,%s,'All','all','true','v1','[]','[]',now(),now(),%s,%s)",
+            (preset, tenant, actor, actor),
+        )
+        conn.execute(
+            "INSERT INTO dashboards(id,tenant_id,name,name_key,created_at,updated_at,created_by,updated_by) "
+            "VALUES(%s,%s,'Board','board',now(),now(),%s,%s)",
+            (board, tenant, actor, actor),
+        )
+        conn.execute(
+            "INSERT INTO dashboard_panels(id,tenant_id,dashboard_id,preset_id,x,y,w,h,thresholds) "
+            "VALUES(%s,%s,%s,%s,0,0,3,2,'[]')",
+            (old, tenant, board, preset),
+        )
+    migrate(migration_db)
+    insert = (
+        "INSERT INTO dashboard_panels(id,tenant_id,dashboard_id,preset_id,x,y,w,h,thresholds,type,content) "
+        "VALUES(%s,%s,%s,%s,3,0,3,2,%s,%s,%s)"
+    )
+    with psycopg.connect(migration_db) as conn:
+        assert conn.execute(
+            "SELECT type,content FROM dashboard_panels WHERE id=%s", (old,)
+        ).fetchone() == ("count", {})
+        # An older API names neither new column and still writes a count panel.
+        conn.execute(
+            "INSERT INTO dashboard_panels(id,tenant_id,dashboard_id,preset_id,x,y,w,h,thresholds) "
+            "VALUES(%s,%s,%s,%s,6,0,3,2,'[]')",
+            (uuid4(), tenant, board, preset),
+        )
+        conn.execute(insert, (uuid4(), tenant, board, None, "[]", "html", json.dumps({"html": "<p>Hi</p>"})))
+        for preset_id, thresholds, kind, content in (
+            (None, "[]", "count", "{}"),
+            (preset, "[]", "html", json.dumps({"html": "<p>Hi</p>"})),
+            (None, '[{"lower_bound":"1","color":"red"}]', "html", json.dumps({"html": ""})),
+            (None, "[]", "html", "{}"),
+            (None, "[]", "html", json.dumps({"html": 3})),
+            (None, "[]", "chart", "{}"),
+            (preset, "[]", "count", "[]"),
+        ):
+            with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+                conn.execute(insert, (uuid4(), tenant, board, preset_id, thresholds, kind, content))
