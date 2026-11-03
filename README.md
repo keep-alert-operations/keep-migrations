@@ -105,6 +105,10 @@ URL. It rewrites no rows and needs no stopped-writer window; validating the chec
 reads `alerts` once under the migration's table lock. Older source code leaves both
 NULL, which marks a row for the source processor's one-time provider backfill. Apply
 it before the processor that stores providers.
+Revision 0061 (REV-58) adds `presets.noisy`, a non-null boolean that defaults to
+false, for a preset's alarm setting. The constant default rewrites no rows and it
+needs no stopped-writer window: older API code names its columns explicitly, so its
+creates read as not noisy and its updates keep the stored value.
 Existing continuation values remain nullable and historical unions default to
 full snapshots; no prior replay proof is rewritten by these migrations.
 `schema_migrations` remains the checksum/audit ledger. `alembic_version` records
