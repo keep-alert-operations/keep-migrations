@@ -1,4 +1,4 @@
-"""0063 adds alert table dashboard panels (REV-63)."""
+"""0063 adds image dashboard panels (REV-62)."""
 
 from appchi.migrate import apply_sql
 
@@ -6,7 +6,7 @@ revision = "0063"
 down_revision = "0062"
 branch_labels = None
 depends_on = None
-sql_file = "0063_table_panels.sql"
+sql_file = "0063_image_panels.sql"
 
 
 def upgrade():
