@@ -72,7 +72,7 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0063",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0064",)]
         for role in ("appchi_api", "appchi_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -86,13 +86,13 @@ def assert_head_and_privileges(dsn):
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 60
+    assert len(before) == 61
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
 
 
-@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060", "0061", "0062"])
+@pytest.mark.parametrize("through", ["0001", "0039", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060", "0061", "0062", "0063"])
 def test_adopt_legacy_without_replaying_sql(migration_db, through):
     legacy_install(migration_db, through)
     before = ledger(migration_db)
@@ -178,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0063" in cli(migration_db, "current").stdout
+    assert "0064" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -234,7 +234,7 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 60
+    assert len(ledger(migration_db)) == 61
     assert_head_and_privileges(migration_db)
 
 
@@ -572,3 +572,63 @@ def test_image_panels_reference_tenant_images(migration_db):
         assert conn.execute(
             "SELECT count(*) FROM pg_policies WHERE tablename='dashboard_images'"
         ).fetchone() == (2,)
+
+
+def test_table_panels_reference_presets_and_bound_rows(migration_db):
+    """Requirements: REV-63; dashboard operations 2, 13 and 14."""
+    legacy_install(migration_db, "0063")
+    tenant, actor, preset, board, old, html = uuid4(), uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    with psycopg.connect(migration_db) as conn:
+        conn.execute("INSERT INTO tenants(id,kind,name,name_key) VALUES(%s,'specific','Tables','tables')", (tenant,))
+        conn.execute(
+            "INSERT INTO presets(id,tenant_id,name,name_key,cel,profile,sort,columns,created_at,updated_at,created_by,updated_by) "
+            "VALUES(%s,%s,'All','all','true','v1','[]','[]',now(),now(),%s,%s)",
+            (preset, tenant, actor, actor),
+        )
+        conn.execute(
+            "INSERT INTO dashboards(id,tenant_id,name,name_key,created_at,updated_at,created_by,updated_by) "
+            "VALUES(%s,%s,'Board','board',now(),now(),%s,%s)",
+            (board, tenant, actor, actor),
+        )
+        conn.execute(
+            "INSERT INTO dashboard_panels(id,tenant_id,dashboard_id,preset_id,x,y,w,h,thresholds) "
+            "VALUES(%s,%s,%s,%s,0,0,3,2,'[]')",
+            (old, tenant, board, preset),
+        )
+        conn.execute(
+            "INSERT INTO dashboard_panels(id,tenant_id,dashboard_id,preset_id,x,y,w,h,thresholds,type,content) "
+            "VALUES(%s,%s,%s,NULL,3,0,3,2,'[]','html',%s)",
+            (html, tenant, board, json.dumps({"html": "<p>Hi</p>"})),
+        )
+    migrate(migration_db)
+    insert = (
+        "INSERT INTO dashboard_panels(id,tenant_id,dashboard_id,preset_id,x,y,w,h,thresholds,type,content) "
+        "VALUES(%s,%s,%s,%s,%s,2,3,2,%s,%s,%s)"
+    )
+    with psycopg.connect(migration_db) as conn:
+        # Existing count and HTML panels are unchanged and still valid.
+        assert conn.execute(
+            "SELECT id,type FROM dashboard_panels WHERE dashboard_id=%s ORDER BY x", (board,)
+        ).fetchall() == [(old, "count"), (html, "html")]
+        for x, rows in ((0, 1), (3, 10), (6, 50)):
+            conn.execute(insert, (uuid4(), tenant, board, preset, x, "[]", "table", json.dumps({"rows": rows})))
+        for preset_id, thresholds, content in (
+            (None, "[]", json.dumps({"rows": 10})),
+            (preset, '[{"lower_bound":"1","color":"red"}]', json.dumps({"rows": 10})),
+            (preset, "[]", "{}"),
+            (preset, "[]", json.dumps({"rows": 0})),
+            (preset, "[]", json.dumps({"rows": 51})),
+            (preset, "[]", json.dumps({"rows": 2.5})),
+            (preset, "[]", json.dumps({"rows": "10"})),
+        ):
+            with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+                conn.execute(insert, (uuid4(), tenant, board, preset_id, 9, thresholds, "table", content))
+        # A table panel's preset reference is enforced like a count panel's.
+        with pytest.raises(psycopg.errors.ForeignKeyViolation), conn.transaction():
+            conn.execute(insert, (uuid4(), tenant, board, uuid4(), 9, "[]", "table", json.dumps({"rows": 5})))
+        # Image panels (REV-62) still reference no preset.
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(
+                insert,
+                (uuid4(), tenant, board, preset, 9, "[]", "image", json.dumps({"url": "https://example.com/a.png"})),
+            )
