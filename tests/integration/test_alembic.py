@@ -11,10 +11,10 @@ from uuid import uuid4
 
 import psycopg
 from psycopg import sql
-from psycopg.conninfo import make_conninfo
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 import pytest
 
-from appchi.migrate import migrate, migration_directory
+from keep.migrate import migrate, migration_directory
 
 pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,10 +22,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture
 def migration_db():
-    admin = os.environ.get("APPCHI_MIGRATION_TEST_ADMIN_URL")
+    admin = os.environ.get("KEEP_MIGRATION_TEST_ADMIN_URL")
     if not admin:
-        pytest.skip("Set APPCHI_MIGRATION_TEST_ADMIN_URL to a disposable PostgreSQL cluster")
-    name = "appchi_migration_test_" + uuid4().hex
+        pytest.skip("Set KEEP_MIGRATION_TEST_ADMIN_URL to a disposable PostgreSQL cluster")
+    name = "keep_migration_test_" + uuid4().hex
     with psycopg.connect(admin, autocommit=True) as conn:
         conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     try:
@@ -63,7 +63,7 @@ def cli(dsn, *args):
     return subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         cwd=ROOT,
-        env={**os.environ, "APPCHI_MIGRATION_URL": dsn},
+        env={**os.environ, "KEEP_MIGRATION_URL": dsn},
         capture_output=True,
         text=True,
         timeout=60,
@@ -72,21 +72,21 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0065",)]
-        for role in ("appchi_api", "appchi_worker"):
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0066",)]
+        for role in ("keep_api", "keep_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
                     assert not conn.execute(
                         "SELECT has_table_privilege(%s,%s,%s)", (role, table, privilege)
                     ).fetchone()[0]
-        conn.execute("SET LOCAL ROLE appchi_api")
+        conn.execute("SET LOCAL ROLE keep_api")
         assert conn.execute("SELECT count(*) FROM alerts").fetchone() == (0,)
 
 
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 62
+    assert len(before) == 63
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
@@ -178,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0065" in cli(migration_db, "current").stdout
+    assert "0066" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -200,12 +200,12 @@ def test_cli_current_does_not_adopt_legacy_history(migration_db):
 
 
 def test_two_processes_serialize_on_the_existing_lock(migration_db):
-    env = {**os.environ, "APPCHI_MIGRATION_URL": migration_db}
+    env = {**os.environ, "KEEP_MIGRATION_URL": migration_db}
     with psycopg.connect(migration_db) as blocker:
         blocker.execute("SELECT pg_advisory_xact_lock(418003210)")
         processes = [
             subprocess.Popen(
-                [sys.executable, "-m", "appchi.migrate"],
+                [sys.executable, "-m", "keep.migrate"],
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -234,7 +234,7 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 62
+    assert len(ledger(migration_db)) == 63
     assert_head_and_privileges(migration_db)
 
 
@@ -255,7 +255,7 @@ def test_scalability_upgrade_preserves_scan_progress_and_adds_safe_nullable_stat
         plan = conn.execute("EXPLAIN (FORMAT JSON) SELECT text FROM alert_notes WHERE tenant_id=%s AND alert_id=%s AND NOT deleted ORDER BY id", (tenant, uuid4())).fetchone()[0]
         assert "alert_notes_projection_lookup" in json.dumps(plan)
         assert conn.execute("SELECT is_nullable,data_type FROM information_schema.columns WHERE table_name='maintenance_alert_checkpoints' AND column_name='continuation'").fetchone() == ("YES", "jsonb")
-        conn.execute("SET LOCAL ROLE appchi_worker")
+        conn.execute("SET LOCAL ROLE keep_worker")
         conn.execute("UPDATE search_reconciliation SET lease_owner=%s,lease_until=clock_timestamp()+interval '30 seconds' WHERE tenant_id=%s", (uuid4(), tenant))
     with psycopg.connect(migration_db) as conn:
         with pytest.raises(psycopg.errors.CheckViolation):
@@ -264,15 +264,16 @@ def test_scalability_upgrade_preserves_scan_progress_and_adds_safe_nullable_stat
         with pytest.raises(psycopg.errors.CheckViolation):
             conn.execute("UPDATE search_reconciliation SET audit_boundary_seq=99 WHERE tenant_id=%s", (tenant,))
     with psycopg.connect(migration_db) as conn:
-        conn.execute("SET LOCAL ROLE appchi_worker")
+        conn.execute("SET LOCAL ROLE keep_worker")
         conn.execute("UPDATE search_reconciliation SET audit_boundary_seq=99,audit_started_at=clock_timestamp(),audit_turns=4 WHERE tenant_id=%s", (tenant,))
 
 
 def test_source_assignment_catch_up_reads_only_unconfirmed_results(migration_db):
     legacy_install(migration_db, "0050")
-    tenant, topic = uuid4(), "appchi.test.alerts.received"
+    tenant, topic = uuid4(), "keep.test.alerts.received"
     with psycopg.connect(migration_db) as conn:
         conn.execute("INSERT INTO tenants(id,kind,name,name_key) VALUES(%s,'specific','Source','source')", (tenant,))
+        # Before 0066 the legacy schema still grants the original appchi_worker role.
         conn.execute("SET LOCAL ROLE appchi_worker")
         # Retained history from before the upgrade; the last ten inputs lost confirmation.
         conn.execute(
@@ -285,7 +286,7 @@ def test_source_assignment_catch_up_reads_only_unconfirmed_results(migration_db)
     catch_up = "UPDATE kafka_source_results SET kafka_confirmed=true WHERE topic=%s AND partition=%s AND input_offset<%s AND NOT kafka_confirmed"
     with psycopg.connect(migration_db) as conn:
         conn.execute("ANALYZE kafka_source_results")
-        conn.execute("SET LOCAL ROLE appchi_worker")
+        conn.execute("SET LOCAL ROLE keep_worker")
         plan = conn.execute("EXPLAIN (FORMAT JSON) " + catch_up, (topic, 0, 20005)).fetchone()[0]
         assert "kafka_source_results_unconfirmed" in json.dumps(plan)
         assert conn.execute(catch_up, (topic, 0, 20005)).rowcount == 5
@@ -306,6 +307,7 @@ def test_search_retention_probe_reads_only_pending_retirements(migration_db):
             conn.execute("INSERT INTO tenants(id,kind,name,name_key) VALUES(%s,'specific',%s,%s)", (name, key, key))
             conn.execute("INSERT INTO tenant_view_state(tenant_id) VALUES(%s) ON CONFLICT DO NOTHING", (name,))
             conn.execute("UPDATE tenant_view_state SET searchable_seq=20000 WHERE tenant_id=%s", (name,))
+        # Before 0066 the legacy schema still grants the original appchi_worker role.
         conn.execute("SET LOCAL ROLE appchi_worker")
         # Kafka-first projection history: no row ever becomes visible. Every 40th
         # row is an already-searchable retirement; the rest are live.
@@ -316,7 +318,7 @@ def test_search_retention_probe_reads_only_pending_retirements(migration_db):
             ([tenant, other],),
         )
     migrate(migration_db)
-    # The feed's probe from appchi-api search_routes.py.
+    # The feed's probe from keep-api search_routes.py.
     probe = (
         "SELECT clock_timestamp() AS now,EXISTS(SELECT 1 FROM projection_work WHERE tenant_id=%(tenant)s"
         " AND seq>(SELECT searchable_seq FROM tenant_view_state WHERE tenant_id=%(tenant)s)"
@@ -325,8 +327,8 @@ def test_search_retention_probe_reads_only_pending_retirements(migration_db):
     with psycopg.connect(migration_db) as conn:
         conn.execute("ANALYZE projection_work")
         conn.execute("ANALYZE tenant_view_state")
-        conn.execute("SET LOCAL ROLE appchi_api")
-        conn.execute("SELECT set_config('appchi.tenant_id',%s,true)", (str(tenant),))
+        conn.execute("SET LOCAL ROLE keep_api")
+        conn.execute("SELECT set_config('keep.tenant_id',%s,true)", (str(tenant),))
         # Planner choice between index paths is what is asserted, not scan costs.
         conn.execute("SET LOCAL enable_seqscan = off")
         conn.execute("SET LOCAL enable_bitmapscan = off")
@@ -455,8 +457,8 @@ def test_incident_report_reads_use_period_and_assignment_indexes(migration_db):
         assert all(len(found) == 32 for found in leaves.values()), leaves
         conn.execute("ANALYZE incident_cycles")
         conn.execute("ANALYZE incident_activity")
-        conn.execute("SET LOCAL ROLE appchi_api")
-        conn.execute("SELECT set_config('appchi.tenant_id',%s,true)", (str(tenant),))
+        conn.execute("SET LOCAL ROLE keep_api")
+        conn.execute("SELECT set_config('keep.tenant_id',%s,true)", (str(tenant),))
         # The planner's choice of index path is asserted, not scan costs.
         conn.execute("SET LOCAL enable_seqscan = off")
         conn.execute("SET LOCAL enable_bitmapscan = off")
@@ -729,3 +731,64 @@ def test_servicenow_panels_keep_thresholds_and_valid_settings(migration_db):
                 )
         with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
             conn.execute(insert, (uuid4(), tenant, board, None, 20, "[]", "pager", "{}"))
+
+
+ACL_SNAPSHOT = """
+SELECT 'table', c.oid::regclass::text, a.grantee::regrole::text, a.privilege_type
+FROM pg_class c, aclexplode(c.relacl) a WHERE c.relacl IS NOT NULL
+UNION ALL
+SELECT 'function', p.oid::regprocedure::text, a.grantee::regrole::text, a.privilege_type
+FROM pg_proc p, aclexplode(p.proacl) a
+WHERE p.proacl IS NOT NULL AND p.pronamespace = 'public'::regnamespace
+UNION ALL
+SELECT 'policy', tablename || '.' || policyname, roles::text, coalesce(qual, '')
+FROM pg_policies
+"""
+
+
+def test_keep_rename_moves_roles_privileges_and_tenant_setting(migration_db):
+    """Requirements: REV-67; repository layout, Ownership (renamed database identities).
+
+    A second database in the same cluster re-creates the appchi_* roles through
+    the unchanged 0001; 0066 must move that database to keep_* as well.
+    """
+    second = migration_db.replace("keep_migration_test_", "keep_migration_peer_")
+    admin = os.environ["KEEP_MIGRATION_TEST_ADMIN_URL"]
+    peer = conninfo_to_dict(second)["dbname"]
+    with psycopg.connect(admin, autocommit=True) as conn:
+        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(peer)))
+    try:
+        snapshots = []
+        for dsn in (migration_db, second):
+            migrate(dsn)
+            with psycopg.connect(dsn) as conn:
+                assert conn.execute(
+                    "SELECT rolname FROM pg_roles WHERE rolname LIKE 'appchi%'"
+                ).fetchall() == []
+                assert {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT rolname FROM pg_roles WHERE rolname IN "
+                        "('keep_api','keep_worker','keep_recovery')"
+                    )
+                } == {"keep_api", "keep_worker", "keep_recovery"}
+                assert conn.execute(
+                    "SELECT count(*) FROM pg_policies WHERE roles::text LIKE '%appchi%' "
+                    "OR coalesce(qual,'') || coalesce(with_check,'') LIKE '%appchi%'"
+                ).fetchone() == (0,)
+                assert conn.execute(
+                    "SELECT count(*) FROM pg_policies WHERE qual LIKE '%keep.tenant_id%'"
+                ).fetchone()[0] > 0
+                assert conn.execute(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conname = 'visibility_inputs_sampling_algorithm_check'"
+                ).fetchone()[0] == (
+                    "CHECK ((sampling_algorithm = 'keep-visibility-sample-v1'::text))"
+                )
+                snapshots.append(sorted(conn.execute(ACL_SNAPSHOT).fetchall()))
+        assert snapshots[0] == snapshots[1]
+        assert not any("appchi" in " ".join(row) for row in snapshots[0])
+        assert_head_and_privileges(second)
+    finally:
+        with psycopg.connect(admin, autocommit=True) as conn:
+            conn.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(peer)))

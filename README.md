@@ -1,8 +1,8 @@
-# appchi-migrations
+# keep-migrations
 
 One ordered Alembic revision chain over immutable, checksummed PostgreSQL SQL files.
 
-See [system design](https://github.com/appchi-alert-operations/appchi-design), [workspace setup](https://github.com/appchi-alert-operations/appchi-delivery) and [source provenance](SOURCE.md).
+See [system design](https://github.com/keep-alert-operations/keep-design), [workspace setup](https://github.com/keep-alert-operations/keep-delivery) and [source provenance](SOURCE.md).
 
 ## Development
 
@@ -17,18 +17,18 @@ poetry run pytest
 poetry build --format wheel
 ```
 
-Shared `appchi` modules use namespace packaging; each module has exactly one owning
+Shared `keep` modules use namespace packaging; each module has exactly one owning
 distribution. Dependencies resolve immutable Git revisions in Python dependency metadata and `poetry.lock`.
 For coordinated local edits use the delivery workspace setup, which installs local
 packages without changing release dependency pins.
 
 ## Execution
 
-`poetry run appchi-migrate` is the entrypoint. Supply the documented environment
+`poetry run keep-migrate` is the entrypoint. Supply the documented environment
 bindings; package installation does not start services or migrate data.
 
-Set `APPCHI_MIGRATION_URL` to the dedicated migration identity's PostgreSQL URL or
-libpq connection string. The existing `python -m appchi.migrate` and Python
+Set `KEEP_MIGRATION_URL` to the dedicated migration identity's PostgreSQL URL or
+libpq connection string. The existing `python -m keep.migrate` and Python
 `migrate(dsn, directory=None)` interfaces call Alembic `upgrade head`. Runtime
 services never migrate on startup. The wheel includes the Alembic environment,
 revisions, SQL files and `migration_sql/checksums.json` manifest.
@@ -44,7 +44,7 @@ poetry run alembic upgrade head
 
 `history` and `heads` do not connect to PostgreSQL. `current` verifies the packaged
 SQL and database history without adopting a legacy database or changing its schema.
-All database commands use `APPCHI_MIGRATION_URL`; no credentials belong in
+All database commands use `KEEP_MIGRATION_URL`; no credentials belong in
 `alembic.ini`. The migration schema is `public`.
 
 ## Existing databases and rollout
@@ -78,7 +78,7 @@ Revision 0054 (REV-41) adds the nullable `received_topic_id` and
 Kafka topic IDs there, and the updated source processor refuses a received topic
 that is not the recorded incarnation, or any received topic while none is recorded.
 Older code ignores the columns. For a cutover recorded before 0054, stop source,
-correlation and indexer, apply it, then run `python -m appchi.kafka_cutover
+correlation and indexer, apply it, then run `python -m keep.kafka_cutover
 --record-topic-identity` before starting the updated processor.
 Revision 0055 (REV-44) adds the nullable `presets.group_by` column for a saved
 preset's optional grouping field. It needs no stopped-writer window: older API
@@ -142,8 +142,8 @@ Use a reviewed forward migration for corrections.
 2. Create its revision, for example
    `poetry run alembic revision --rev-id NNNN -m "descriptive change"`.
 3. Add the SQL file named by the generated revision's `sql_file` under
-   `src/appchi/migration_sql`. Add its exact-byte SHA-256 entry to
-   `src/appchi/migration_sql/checksums.json`; do not update old entries.
+   `src/keep/migration_sql`. Add its exact-byte SHA-256 entry to
+   `src/keep/migration_sql/checksums.json`; do not update old entries.
 4. Keep one linear revision chain. Review SQL and run fresh-install, supported
    upgrade, privilege, failure and relevant application compatibility tests.
 
@@ -155,7 +155,7 @@ that require execution outside a transaction need a separately designed workflow
 
 ## Database verification
 
-Set `APPCHI_MIGRATION_TEST_ADMIN_URL` to a **disposable isolated PostgreSQL cluster**
+Set `KEEP_MIGRATION_TEST_ADMIN_URL` to a **disposable isolated PostgreSQL cluster**
 whose test identity can create/drop databases and create the synthetic runtime
 roles. Each test creates a uniquely named database and removes it afterward.
 
