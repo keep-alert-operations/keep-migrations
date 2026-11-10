@@ -72,7 +72,7 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0066",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0067",)]
         for role in ("keep_api", "keep_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -86,7 +86,7 @@ def assert_head_and_privileges(dsn):
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 63
+    assert len(before) == 64
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
@@ -178,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0066" in cli(migration_db, "current").stdout
+    assert "0067" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -234,7 +234,7 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 63
+    assert len(ledger(migration_db)) == 64
     assert_head_and_privileges(migration_db)
 
 
@@ -731,6 +731,56 @@ def test_servicenow_panels_keep_thresholds_and_valid_settings(migration_db):
                 )
         with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
             conn.execute(insert, (uuid4(), tenant, board, None, 20, "[]", "pager", "{}"))
+
+
+def test_grafana_panels_hold_one_address_and_reference_nothing(migration_db):
+    """Requirements: REV-68; dashboard operations 2, 3 and 14."""
+    legacy_install(migration_db, "0064")
+    tenant, actor, preset, board, html = uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    with psycopg.connect(migration_db) as conn:
+        conn.execute("INSERT INTO tenants(id,kind,name,name_key) VALUES(%s,'specific','Graphs','graphs')", (tenant,))
+        conn.execute(
+            "INSERT INTO presets(id,tenant_id,name,name_key,cel,profile,sort,columns,created_at,updated_at,created_by,updated_by) "
+            "VALUES(%s,%s,'All','all','true','v1','[]','[]',now(),now(),%s,%s)",
+            (preset, tenant, actor, actor),
+        )
+        conn.execute(
+            "INSERT INTO dashboards(id,tenant_id,name,name_key,created_at,updated_at,created_by,updated_by) "
+            "VALUES(%s,%s,'Board','board',now(),now(),%s,%s)",
+            (board, tenant, actor, actor),
+        )
+        conn.execute(
+            "INSERT INTO dashboard_panels(id,tenant_id,dashboard_id,x,y,w,h,thresholds,type,content) "
+            "VALUES(%s,%s,%s,0,0,3,2,'[]','html',%s)",
+            (html, tenant, board, json.dumps({"html": "<p>Hi</p>"})),
+        )
+    migrate(migration_db)
+    insert = (
+        "INSERT INTO dashboard_panels(id,tenant_id,dashboard_id,preset_id,x,y,w,h,thresholds,type,content) "
+        "VALUES(%s,%s,%s,%s,%s,2,3,2,%s,'grafana',%s)"
+    )
+    panel = "https://grafana.example.com/d-solo/ck81x/checkout?orgId=1&panelId=4"
+    with psycopg.connect(migration_db) as conn:
+        # The existing HTML panel is unchanged and satisfies the widened checks.
+        assert conn.execute("SELECT type FROM dashboard_panels WHERE id=%s", (html,)).fetchone() == ("html",)
+        conn.execute(insert, (uuid4(), tenant, board, None, 0, "[]", json.dumps({"url": panel})))
+        linked = {"url": "http://127.0.0.1:3000/d-solo/a/b?panelId=1", "link": {"url": "https://grafana.example.com/d/ck81x", "label": None}}
+        conn.execute(insert, (uuid4(), tenant, board, None, 3, "[]", json.dumps(linked)))
+        conn.execute(insert, (uuid4(), tenant, board, None, 6, "[]", json.dumps({"url": "https://g.example/" + "x" * 2030})))
+        for preset_id, thresholds, content in (
+            (None, "[]", {}),
+            (None, "[]", {"url": ""}),
+            (None, "[]", {"url": 7}),
+            (None, "[]", {"url": None}),
+            (None, "[]", {"url": "ftp://grafana.example.com/d-solo/a"}),
+            (None, "[]", {"url": "https:grafana.example.com/d-solo/a"}),
+            (None, "[]", {"url": "javascript:alert(1)//https://x"}),
+            (None, "[]", {"url": "https://g.example/" + "x" * 2031}),
+            (preset, "[]", {"url": panel}),
+            (None, '[{"lower_bound":"1","color":"red"}]', {"url": panel}),
+        ):
+            with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+                conn.execute(insert, (uuid4(), tenant, board, preset_id, 9, thresholds, json.dumps(content)))
 
 
 ACL_SNAPSHOT = """
