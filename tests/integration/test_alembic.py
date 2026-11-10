@@ -72,7 +72,7 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0068",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0069",)]
         for role in ("keep_api", "keep_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -86,7 +86,7 @@ def assert_head_and_privileges(dsn):
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 65
+    assert len(before) == 66
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
@@ -178,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0068" in cli(migration_db, "current").stdout
+    assert "0069" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -234,7 +234,7 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 65
+    assert len(ledger(migration_db)) == 66
     assert_head_and_privileges(migration_db)
 
 
@@ -917,3 +917,64 @@ def test_keep_rename_moves_roles_privileges_and_tenant_setting(migration_db):
     finally:
         with psycopg.connect(admin, autocommit=True) as conn:
             conn.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(peer)))
+
+
+def test_incident_ticket_columns_keep_incidents_and_check_links(migration_db):
+    """Requirements: REV-70; incident operations 15 and 18; system completion 15."""
+    legacy_install(migration_db, "0068")
+    tenant, incident, cycle, person = uuid4(), uuid4(), uuid4(), uuid4()
+    with psycopg.connect(migration_db) as conn:
+        conn.execute("INSERT INTO tenants(id,kind,name,name_key) VALUES(%s,'specific','Tickets','tickets')", (tenant,))
+        conn.execute(
+            "INSERT INTO principals(id,directory_source,object_id,kind,display_name,eligible) "
+            "VALUES(%s,'test','dana','user','Dana Levi',true)",
+            (person,),
+        )
+        conn.execute("INSERT INTO incident_identities(id,tenant_id) VALUES(%s,%s)", (incident, tenant))
+        conn.execute(
+            "INSERT INTO incidents(id,tenant_id,title,description,severity,status,origin,cycle_id,created_at,updated_at,last_activity) "
+            "VALUES(%s,%s,'Checkout slow','','critical','open','manual',%s,now(),now(),now())",
+            (incident, tenant, cycle),
+        )
+    migrate(migration_db)
+    url = "https://acme.service-now.com/nav_to.do?uri=incident.do%3Fsysparm_query%3Dnumber%3DINC0041235"
+    update = (
+        "UPDATE incidents SET ticket_url=%s,ticket_number=%s,ticket_linked_at=%s,ticket_linked_by=%s "
+        "WHERE id=%s"
+    )
+    with psycopg.connect(migration_db) as conn:
+        # An existing incident has no ticket and keeps its revision.
+        assert conn.execute(
+            "SELECT ticket_url,ticket_number,ticket_linked_at,ticket_linked_by,revision FROM incidents WHERE id=%s",
+            (incident,),
+        ).fetchone() == (None, None, None, None, 1)
+        for number in ("INC0041235", None, "RITM0001234", "AB1234", "ABCDEFGH123456789012"):
+            with conn.transaction(force_rollback=True):
+                conn.execute(update, (url, number, "2026-11-10T14:22:00Z", person, incident))
+        with conn.transaction(force_rollback=True):
+            conn.execute(update, ("h" * 2048, None, "2026-11-10T14:22:00Z", person, incident))
+        for values in (
+            ("", None, "2026-11-10T14:22:00Z", person),
+            ("h" * 2049, None, "2026-11-10T14:22:00Z", person),
+            (url, "inc0041235", "2026-11-10T14:22:00Z", person),
+            (url, "INC 0041235", "2026-11-10T14:22:00Z", person),
+            (url, "0041235", "2026-11-10T14:22:00Z", person),
+            (url, "INC123", "2026-11-10T14:22:00Z", person),
+            (None, "INC0041235", None, None),
+            (url, None, None, person),
+            (url, None, "2026-11-10T14:22:00Z", None),
+            (None, None, "2026-11-10T14:22:00Z", None),
+            (None, None, None, person),
+        ):
+            with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+                conn.execute(update, (*values, incident))
+        with pytest.raises(psycopg.errors.ForeignKeyViolation), conn.transaction():
+            conn.execute(update, (url, None, "2026-11-10T14:22:00Z", uuid4(), incident))
+        # The API role reads and writes the new columns under the tenant's policy.
+        conn.execute("SET LOCAL ROLE keep_api")
+        conn.execute("SELECT set_config('keep.tenant_id',%s,true)", (str(tenant),))
+        conn.execute(update, (url, "INC0041235", "2026-11-10T14:22:00Z", person, incident))
+        assert conn.execute(
+            "SELECT ticket_number FROM incidents WHERE id=%s", (incident,)
+        ).fetchone() == ("INC0041235",)
+    assert_head_and_privileges(migration_db)
