@@ -109,6 +109,14 @@ Revision 0061 (REV-58) adds `presets.noisy`, a non-null boolean that defaults to
 false, for a preset's alarm setting. The constant default rewrites no rows and it
 needs no stopped-writer window: older API code names its columns explicitly, so its
 creates read as not noisy and its updates keep the stored value.
+Revision 0070 (REV-73) removes the OpenID Connect state that Keycloak sign-in used:
+the `oidc_bindings`, `login_transactions` and `logout_fences` tables and the provider,
+token, refresh and activity columns of `auth_sessions`. It empties
+`directory_verification_requests`, adds the columns the API's save on pick uses, and
+grants `keep_api` the writes that publication needs. API and worker code from before
+0070 reads the dropped columns, so stop every API and worker before applying it and
+start only REV-73 services afterwards. The drops can't be undone by a forward
+migration; take a backup first wherever the data matters.
 Existing continuation values remain nullable and historical unions default to
 full snapshots; no prior replay proof is rewritten by these migrations.
 `schema_migrations` remains the checksum/audit ledger. `alembic_version` records
