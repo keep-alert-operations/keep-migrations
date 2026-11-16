@@ -72,7 +72,7 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0069",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0070",)]
         for role in ("keep_api", "keep_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -86,7 +86,7 @@ def assert_head_and_privileges(dsn):
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 66
+    assert len(before) == 67
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
@@ -178,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0069" in cli(migration_db, "current").stdout
+    assert "0070" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -234,7 +234,7 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 66
+    assert len(ledger(migration_db)) == 67
     assert_head_and_privileges(migration_db)
 
 
@@ -977,4 +977,124 @@ def test_incident_ticket_columns_keep_incidents_and_check_links(migration_db):
         assert conn.execute(
             "SELECT ticket_number FROM incidents WHERE id=%s", (incident,)
         ).fetchone() == ("INC0041235",)
+    assert_head_and_privileges(migration_db)
+
+
+def test_password_login_drops_oidc_state_and_lets_the_api_save_picks(migration_db):
+    """Requirements: REV-73; plan A15."""
+    legacy_install(migration_db, "0069")
+    person, team = uuid4(), uuid4()
+    with psycopg.connect(migration_db) as conn:
+        for principal, object_id, kind in ((person, "dana", "user"), (team, "keep-developers", "team")):
+            conn.execute(
+                "INSERT INTO principals(id,directory_source,object_id,kind,display_name,eligible) "
+                "VALUES(%s,'adapi',%s,%s,%s,true)",
+                (principal, object_id, kind, object_id),
+            )
+        conn.execute("INSERT INTO oidc_bindings VALUES('https://idp','sub-1',%s)", (person,))
+        conn.execute(
+            "INSERT INTO auth_sessions(handle_hash,principal_id,issuer,subject,provider_sid,tokens,"
+            "csrf_hash,csrf_cipher,auth_time,activity_at,absolute_at,deployment_epoch) "
+            "VALUES('\\x01',%s,'https://idp','sub-1','sid-1','\\x02','\\x03','\\x04',now(),now(),"
+            "now()+interval '8 hours','epoch-1')",
+            (person,),
+        )
+        conn.execute(
+            "INSERT INTO directory_verification_requests(source,object_id) VALUES('keycloak-local','old')"
+        )
+    migrate(migration_db)
+    with psycopg.connect(migration_db) as conn:
+        # The OpenID Connect tables, columns and provider index are gone; sessions survive.
+        assert conn.execute(
+            "SELECT to_regclass('oidc_bindings'),to_regclass('login_transactions'),"
+            "to_regclass('logout_fences'),to_regclass('auth_session_sid')"
+        ).fetchone() == (None, None, None, None)
+        assert [
+            row[0]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='auth_sessions' ORDER BY column_name"
+            ).fetchall()
+        ] == [
+            "absolute_at", "auth_time", "csrf_cipher", "csrf_hash", "deployment_epoch",
+            "handle_hash", "last_tenant_id", "principal_id", "revoked_at",
+        ]
+        assert conn.execute(
+            "SELECT principal_id,deployment_epoch FROM auth_sessions WHERE handle_hash='\\x01'"
+        ).fetchone() == (person, "epoch-1")
+        # Old pending rows have no kind and are removed; one row per source and object.
+        assert conn.execute("SELECT count(*) FROM directory_verification_requests").fetchone() == (0,)
+        columns = dict(
+            (name, (nullable, data_type))
+            for name, nullable, data_type in conn.execute(
+                "SELECT column_name,is_nullable,data_type FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='directory_verification_requests'"
+            ).fetchall()
+        )
+        assert columns == {
+            "source": ("NO", "text"),
+            "object_id": ("NO", "text"),
+            "requested_at": ("NO", "timestamp with time zone"),
+            "kind": ("NO", "text"),
+            "lease_owner": ("YES", "uuid"),
+            "lease_until": ("YES", "timestamp with time zone"),
+            "last_failure": ("YES", "text"),
+            "updated_at": ("NO", "timestamp with time zone"),
+        }
+        insert = (
+            "INSERT INTO directory_verification_requests(source,object_id,kind,last_failure) "
+            "VALUES('adapi',%s,%s,%s)"
+        )
+        failures = (
+            None, "directory_unavailable", "directory_group_too_large",
+            "directory_verification_deadline", "directory_busy",
+        )
+        for number, failure in enumerate(failures):
+            with conn.transaction(force_rollback=True):
+                conn.execute(insert, (f"team-{number}", "team", failure))
+        for values in (("x", "group", None), ("x", "user", "directory_verification_incomplete")):
+            with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+                conn.execute(insert, values)
+        with pytest.raises(psycopg.errors.NotNullViolation), conn.transaction():
+            conn.execute(insert, ("x", None, None))
+        with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
+            conn.execute(insert, ("dana", "user", None))
+            conn.execute(insert, ("dana", "user", None))
+        for table, privileges in (
+            ("directory_verification_requests", ("SELECT", "INSERT", "UPDATE", "DELETE")),
+            ("directory_edges", ("SELECT", "INSERT", "UPDATE", "DELETE")),
+            ("directory_root_checkpoints", ("SELECT", "INSERT", "UPDATE", "DELETE")),
+        ):
+            for privilege in privileges:
+                assert conn.execute(
+                    "SELECT has_table_privilege('keep_api',%s,%s)", (table, privilege)
+                ).fetchone() == (True,), (table, privilege)
+            assert conn.execute(
+                "SELECT has_table_privilege('keep_api',%s,'TRUNCATE')", (table,)
+            ).fetchone() == (False,)
+        assert conn.execute(
+            "SELECT has_sequence_privilege('keep_api','directory_generation_seq','USAGE')"
+        ).fetchone() == (True,)
+        assert conn.execute(
+            "SELECT has_table_privilege('keep_recovery','auth_sessions','SELECT,UPDATE')"
+        ).fetchone() == (True,)
+        # The API role claims a pending save and publishes edges, a checkpoint and a generation.
+        conn.execute("SET LOCAL ROLE keep_api")
+        conn.execute(insert, ("keep-developers", "team", None))
+        assert conn.execute(
+            "UPDATE directory_verification_requests SET lease_owner=%s,"
+            "lease_until=clock_timestamp()+interval '120 seconds',updated_at=clock_timestamp() "
+            "WHERE source='adapi' AND object_id='keep-developers' "
+            "AND (lease_until IS NULL OR lease_until<clock_timestamp()) RETURNING kind",
+            (uuid4(),),
+        ).fetchall() == [("team",)]
+        generation = conn.execute("SELECT nextval('directory_generation_seq')").fetchone()[0]
+        conn.execute("INSERT INTO directory_edges VALUES(%s,%s)", (team, person))
+        conn.execute(
+            "INSERT INTO directory_root_checkpoints VALUES(%s,%s,clock_timestamp(),'digest') "
+            "ON CONFLICT(root_id) DO UPDATE SET generation=EXCLUDED.generation",
+            (team, generation),
+        )
+        conn.execute("DELETE FROM directory_edges WHERE parent_id=%s", (team,))
+        conn.execute("DELETE FROM directory_verification_requests WHERE object_id='keep-developers'")
     assert_head_and_privileges(migration_db)
