@@ -72,7 +72,7 @@ def cli(dsn, *args):
 
 def assert_head_and_privileges(dsn):
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0070",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("0071",)]
         for role in ("keep_api", "keep_worker"):
             for table in ("schema_migrations", "alembic_version"):
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -86,7 +86,7 @@ def assert_head_and_privileges(dsn):
 def test_fresh_install_and_repeat(migration_db):
     migrate(migration_db)
     before = ledger(migration_db)
-    assert len(before) == 67
+    assert len(before) == 68
     migrate(migration_db)
     assert ledger(migration_db) == before
     assert_head_and_privileges(migration_db)
@@ -178,7 +178,7 @@ def test_cli_upgrade_current_and_unsupported_mutations(migration_db):
         ).fetchone() == (None, None)
     upgraded = cli(migration_db, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
-    assert "0070" in cli(migration_db, "current").stdout
+    assert "0071" in cli(migration_db, "current").stdout
     for args in (("downgrade", "base"), ("stamp", "base"), ("upgrade", "head", "--sql")):
         assert cli(migration_db, *args).returncode != 0
     assert_head_and_privileges(migration_db)
@@ -234,7 +234,7 @@ def test_two_processes_serialize_on_the_existing_lock(migration_db):
                 if process.poll() is None:
                     process.kill()
                     process.communicate(timeout=10)
-    assert len(ledger(migration_db)) == 67
+    assert len(ledger(migration_db)) == 68
     assert_head_and_privileges(migration_db)
 
 
@@ -1097,4 +1097,39 @@ def test_password_login_drops_oidc_state_and_lets_the_api_save_picks(migration_d
         )
         conn.execute("DELETE FROM directory_edges WHERE parent_id=%s", (team,))
         conn.execute("DELETE FROM directory_verification_requests WHERE object_id='keep-developers'")
+    assert_head_and_privileges(migration_db)
+
+
+def test_v1_native_fields_add_object_and_widen_severity(migration_db):
+    """Requirements: REV-77; alert operations 3 and 4 (v1 stored as sent)."""
+    legacy_install(migration_db, "0070")
+    migrate(migration_db)
+    with psycopg.connect(migration_db) as conn:
+        columns = dict(
+            (name, (nullable, data_type))
+            for name, nullable, data_type in conn.execute(
+                "SELECT column_name,is_nullable,data_type FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='alerts' "
+                "AND column_name IN ('object','component')"
+            ).fetchall()
+        )
+        assert columns == {"object": ("YES", "text"), "component": ("YES", "text")}
+        (check,) = conn.execute(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid='alerts'::regclass AND conname='alerts_severity_check'"
+        ).fetchone()
+        for value in ("critical", "high", "error", "major", "warning", "clear"):
+            assert f"'{value}'" in check
+        assert "medium" not in check
+        # The only severity CHECK on alerts is the widened one.
+        assert conn.execute(
+            "SELECT count(*) FROM pg_constraint WHERE conrelid='alerts'::regclass "
+            "AND contype='c' AND pg_get_constraintdef(oid) LIKE '%severity%'"
+        ).fetchone() == (1,)
+        # Table-level grants cover the new column for both service roles.
+        for role in ("keep_api", "keep_worker"):
+            for privilege in ("SELECT", "INSERT", "UPDATE"):
+                assert conn.execute(
+                    "SELECT has_column_privilege(%s,'alerts','object',%s)", (role, privilege)
+                ).fetchone() == (True,), (role, privilege)
     assert_head_and_privileges(migration_db)
